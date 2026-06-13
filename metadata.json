@@ -1,0 +1,6 @@
+{
+  "name": "Invoice Generator",
+  "description": "Create, customize, and download high-quality professional invoices instantly right in your browser, with persistent seller settings, live tax calculation (with regional Indian GST models), and interactive preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
