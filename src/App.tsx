@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, ChangeEvent } from 'react';
 import { 
   Building2, 
   Users, 
@@ -19,7 +19,9 @@ import {
   Clock,
   Briefcase,
   Eye,
-  EyeOff
+  EyeOff,
+  Upload,
+  Image as ImageIcon
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -41,6 +43,153 @@ import {
   addDaysToDate, 
   formatDateDisplay 
 } from './utils';
+
+interface ProcessedWatermark {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+const getFadedWatermark = (base64: string, opacity: number = 0.06, maxBoundingSize: number = 240): Promise<ProcessedWatermark> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const origW = img.naturalWidth || img.width || 100;
+      const origH = img.naturalHeight || img.height || 100;
+      
+      const ratio = Math.min(maxBoundingSize / origW, maxBoundingSize / origH);
+      const targetW = origW * ratio;
+      const targetH = origH * ratio;
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.globalAlpha = opacity;
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        resolve({
+          dataUrl: canvas.toDataURL('image/png'),
+          width: targetW,
+          height: targetH
+        });
+      } else {
+        resolve({ dataUrl: base64, width: maxBoundingSize, height: maxBoundingSize });
+      }
+    };
+    img.onerror = () => {
+      resolve({ dataUrl: base64, width: maxBoundingSize, height: maxBoundingSize });
+    };
+    img.src = base64;
+  });
+};
+
+const trimTransparentPixels = (base64: string): Promise<string> => {
+  return new Promise((resolve) => {
+    // If it's not a standard base64 image data-url, resolve original immediately
+    if (!base64 || !base64.startsWith('data:image/')) {
+      resolve(base64);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(base64);
+        return;
+      }
+
+      const w = img.naturalWidth || img.width || 100;
+      const h = img.naturalHeight || img.height || 100;
+      canvas.width = w;
+      canvas.height = h;
+      ctx.drawImage(img, 0, 0);
+
+      try {
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const data = imgData.data;
+
+        let minX = w;
+        let minY = h;
+        let maxX = 0;
+        let maxY = 0;
+        let hasPixels = false;
+
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const alpha = data[(y * w + x) * 4 + 3];
+            if (alpha > 5) { // non-transparent or barely transparent pixel found
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+              hasPixels = true;
+            }
+          }
+        }
+
+        if (!hasPixels) {
+          resolve(base64);
+          return;
+        }
+
+        const croppedCanvas = document.createElement('canvas');
+        const croppedCtx = croppedCanvas.getContext('2d');
+        if (!croppedCtx) {
+          resolve(base64);
+          return;
+        }
+
+        const croppedW = maxX - minX + 1;
+        const croppedH = maxY - minY + 1;
+
+        croppedCanvas.width = croppedW;
+        croppedCanvas.height = croppedH;
+
+        croppedCtx.drawImage(
+          canvas,
+          minX, minY, croppedW, croppedH,
+          0, 0, croppedW, croppedH
+        );
+
+        resolve(croppedCanvas.toDataURL('image/png'));
+      } catch (e) {
+        // Fallback silently if canvas selection/getImageData fails due to any reason
+        resolve(base64);
+      }
+    };
+    img.onerror = () => {
+      resolve(base64);
+    };
+    img.src = base64;
+  });
+};
+
+interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+const getProportionalDimensions = (base64: string, maxWidth: number, maxHeight: number): Promise<ImageDimensions> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const origW = img.naturalWidth || img.width || 100;
+      const origH = img.naturalHeight || img.height || 100;
+      
+      const ratio = Math.min(maxWidth / origW, maxHeight / origH);
+      resolve({
+        width: origW * ratio,
+        height: origH * ratio
+      });
+    };
+    img.onerror = () => {
+      resolve({ width: maxWidth, height: maxHeight });
+    };
+    img.src = base64;
+  });
+};
 
 export default function App() {
   // --- STATE PERSISTENCE LOADERS & DEFAULTS ---
@@ -90,6 +239,21 @@ export default function App() {
     return saved || defaultNotesText;
   });
 
+  const [logoBase64, setLogoBase64] = useState<string | null>(() => {
+    return localStorage.getItem('invoice_sf_logo') || null;
+  });
+
+  useEffect(() => {
+    if (logoBase64) {
+      trimTransparentPixels(logoBase64).then((trimmed) => {
+        if (trimmed && trimmed !== logoBase64) {
+          setLogoBase64(trimmed);
+          localStorage.setItem('invoice_sf_logo', trimmed);
+        }
+      });
+    }
+  }, [logoBase64]);
+
   const [fieldConfig, setFieldConfig] = useState(() => {
     const saved = localStorage.getItem('invoice_sf_field_config');
     const defaults = {
@@ -108,6 +272,8 @@ export default function App() {
       showPaymentTerms: true,
       showSignatureBlock: true,
       signatoryTitle: 'Authorized Signatory',
+      showLogoOnPdf: true,
+      showWatermarkOnPdf: true,
     };
     return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
   });
@@ -371,6 +537,25 @@ export default function App() {
     setLineItems(prev => prev.filter(item => item.id !== id));
   };
 
+  const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 1024 * 1024) {
+      alert("Please select an image smaller than 1MB for optimal performance and storage.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        setLogoBase64(reader.result);
+        localStorage.setItem('invoice_sf_logo', reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleResetInvoiceData = () => {
     // Reset client details, keeps seller & bank
     setClient({
@@ -409,14 +594,39 @@ export default function App() {
   };
 
   // --- PDF GENERATOR IN JS-PDF ---
-  const handleDownloadPDF = () => {
+  const handleDownloadPDF = async () => {
     try {
+      let watermarkInfo: ProcessedWatermark | null = null;
+      if (logoBase64 && fieldConfig.showWatermarkOnPdf) {
+        try {
+          watermarkInfo = await getFadedWatermark(logoBase64, 0.05); // 5% opacity
+        } catch (e) {
+          console.error("Failed to generate watermark", e);
+        }
+      }
+
       // pt size limits: A4 is 595.28 x 841.89 points
       const doc = new jsPDF({
         orientation: 'portrait',
         unit: 'pt',
         format: 'a4'
       });
+
+      const addPageWithWatermark = () => {
+        doc.addPage();
+        if (watermarkInfo) {
+          const wX = (595 - watermarkInfo.width) / 2;
+          const wY = (842 - watermarkInfo.height) / 2;
+          doc.addImage(watermarkInfo.dataUrl, 'PNG', wX, wY, watermarkInfo.width, watermarkInfo.height, undefined, 'FAST');
+        }
+      };
+
+      // Draw watermark on page 1 (under layer of texts)
+      if (watermarkInfo) {
+        const wX = (595 - watermarkInfo.width) / 2;
+        const wY = (842 - watermarkInfo.height) / 2;
+        doc.addImage(watermarkInfo.dataUrl, 'PNG', wX, wY, watermarkInfo.width, watermarkInfo.height, undefined, 'FAST');
+      }
 
       // Colors
       const primaryColor: [number, number, number] = [79, 70, 229]; // Indigo-600
@@ -427,28 +637,74 @@ export default function App() {
       let y = 50;
 
       // 1. HEADER BRANDING & METADATA
-      // Seller Brand (Left)
-      if (seller.companyName) {
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(18);
-        doc.setTextColor(darkText[0], darkText[1], darkText[2]);
-        doc.text(seller.companyName, 40, y);
+      // Get logo dimensions if loaded and active
+      let logoWidth = 0;
+      let logoHeight = 0;
+      if (logoBase64 && fieldConfig.showLogoOnPdf) {
+        try {
+          // Bounding box for logo: width 60pt, height 40pt
+          const dims = await getProportionalDimensions(logoBase64, 60, 40);
+          logoWidth = dims.width;
+          logoHeight = dims.height;
+        } catch (e) {
+          console.error("Header logo dimension resolution failed:", e);
+        }
+      }
+
+      // Draw Logo and Company name side-by-side
+      let sellerYStart = y;
+
+      if (logoWidth > 0 && logoHeight > 0 && logoBase64) {
+        try {
+          // Logo x=40, y=50.
+          doc.addImage(logoBase64, 'PNG', 40, y, logoWidth, logoHeight, undefined, 'FAST');
+          
+          // Draw Company Name beside logo
+          if (seller.companyName) {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(18);
+            doc.setTextColor(darkText[0], darkText[1], darkText[2]);
+            // Vertically center company name text with the logo height
+            const textY = y + (logoHeight / 2) + 6;
+            doc.text(seller.companyName, 40 + logoWidth + 4, textY);
+          }
+          
+          // Address details start below the logo
+          sellerYStart = y + logoHeight + 12;
+        } catch (e) {
+          console.error("Header logo draw failed:", e);
+          // Fallback if draw fails
+          if (seller.companyName) {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(18);
+            doc.setTextColor(darkText[0], darkText[1], darkText[2]);
+            doc.text(seller.companyName, 40, y + 12);
+          }
+          sellerYStart = y + 30;
+        }
+      } else {
+        // No logo: draw Company Name normally
+        if (seller.companyName) {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(18);
+          doc.setTextColor(darkText[0], darkText[1], darkText[2]);
+          doc.text(seller.companyName, 40, y + 12);
+        }
+        sellerYStart = y + 30;
       }
       
       // Invoice Heading (Right)
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(22);
       doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-      doc.text("INVOICE", 555, y, { align: 'right' });
+      doc.text("INVOICE", 555, y + 15, { align: 'right' });
 
-      y += 18;
-
-      // Seller Details
+      // Seller Details (starts at left margin 40 under both logo and name)
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8.5);
       doc.setTextColor(grayText[0], grayText[1], grayText[2]);
       
-      let sellerY = y;
+      let sellerY = sellerYStart;
       if (fieldConfig.showSellerAddress && seller.address) {
         const sellerLines = seller.address.split('\n');
         sellerLines.forEach(line => {
@@ -483,8 +739,8 @@ export default function App() {
         }
       }
 
-      // Invoice Details (Right Grid align)
-      let metaY = y;
+      // Invoice Details (Right Grid align - starts below INVOICE title context)
+      let metaY = y + 33;
       doc.setFontSize(8.5);
       
       const drawPdfMeta = (label: string, value: string) => {
@@ -626,7 +882,14 @@ export default function App() {
         alternateRowStyles: {
           fillColor: [250, 251, 252]
         },
-        margin: { left: 40, right: 40 }
+        margin: { left: 40, right: 40 },
+        didDrawPage: (data) => {
+          if (watermarkInfo && data.pageNumber > 1) {
+            const wX = (595 - watermarkInfo.width) / 2;
+            const wY = (842 - watermarkInfo.height) / 2;
+            doc.addImage(watermarkInfo.dataUrl, 'PNG', wX, wY, watermarkInfo.width, watermarkInfo.height, undefined, 'FAST');
+          }
+        }
       });
 
       // Get Y post-table
@@ -635,7 +898,7 @@ export default function App() {
       // 4. SUMMARY BOX & BANK DETAILS
       // If height remaining is poor, move to new page
       if (finalY > 600) {
-        doc.addPage();
+        addPageWithWatermark();
         finalY = 50;
       }
 
@@ -766,7 +1029,7 @@ export default function App() {
       const bottomY = Math.max(leftBoxY, rightBoxY) + 15;
       let notesY = bottomY;
       if (notesY > 740) {
-        doc.addPage();
+        addPageWithWatermark();
         notesY = 50;
       }
 
@@ -800,7 +1063,7 @@ export default function App() {
       if (fieldConfig.showSignatureBlock) {
         let sigY = notesY + 20;
         if (sigY > 780) {
-          doc.addPage();
+          addPageWithWatermark();
           sigY = 50;
         }
         doc.setFont('helvetica', 'normal');
@@ -941,6 +1204,86 @@ export default function App() {
 
               {openedCard === 'seller' && (
                 <div className="p-5 space-y-4">
+                  {/* Digital Company Logo Upload Card */}
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200/60 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-700">Company Logo / Icon</label>
+                      {logoBase64 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLogoBase64(null);
+                            localStorage.removeItem('invoice_sf_logo');
+                          }}
+                          className="inline-flex items-center gap-1 text-[10px] text-rose-500 hover:text-rose-600 font-bold"
+                          id="remove-logo-btn"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          <span>Remove</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {!logoBase64 ? (
+                      <div className="relative border-2 border-dashed border-slate-200 hover:border-indigo-400 rounded-xl p-4 bg-white transition-all text-center flex flex-col items-center justify-center cursor-pointer group">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleLogoChange}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                          id="logo-file-picker"
+                        />
+                        <div className="bg-slate-50 group-hover:bg-indigo-50/50 p-2 rounded-full text-slate-400 group-hover:text-indigo-500 transition-colors mb-2">
+                          <Upload className="h-4.5 w-4.5" />
+                        </div>
+                        <span className="text-xs font-medium text-slate-600">Upload Company Logo</span>
+                        <span className="text-[9px] text-slate-400 mt-1 font-mono">PNG, JPG, SVG up to 1MB</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 bg-white border border-slate-150 p-2.5 rounded-lg shadow-xs">
+                        <div className="h-12 w-12 shrink-0 bg-slate-50 border border-slate-100 rounded-lg p-1 flex items-center justify-center overflow-hidden">
+                          <img
+                            src={logoBase64}
+                            alt="Uploaded Seller Logo"
+                            className="max-w-full max-h-full object-contain"
+                            referrerPolicy="no-referrer"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-0.5">
+                          <div className="text-[11px] font-bold text-slate-700 truncate flex items-center gap-1 font-sans">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                            Logo Loaded
+                          </div>
+                          <p className="text-[9.5px] text-slate-500 leading-tight">
+                            Applied as header branding & faded watermark pattern.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Logo behavioural toggles */}
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/50 selection:bg-transparent">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={fieldConfig.showLogoOnPdf ?? true}
+                          onChange={() => setFieldConfig(prev => ({ ...prev, showLogoOnPdf: !(prev.showLogoOnPdf ?? true) }))}
+                          className="h-3.5 w-3.5 rounded text-indigo-500 focus:ring-indigo-500/25 border-slate-200"
+                        />
+                        <span className="text-[10px] font-semibold text-slate-500">Logo in Header</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={fieldConfig.showWatermarkOnPdf ?? true}
+                          onChange={() => setFieldConfig(prev => ({ ...prev, showWatermarkOnPdf: !(prev.showWatermarkOnPdf ?? true) }))}
+                          className="h-3.5 w-3.5 rounded text-indigo-500 focus:ring-indigo-500/25 border-slate-200"
+                        />
+                        <span className="text-[10px] font-semibold text-slate-500">Logo Watermark</span>
+                      </label>
+                    </div>
+                  </div>
+
                   <div>
                     <label className="block text-xs font-semibold text-slate-600 mb-1">Company / Seller Name</label>
                     <input 
@@ -2060,19 +2403,42 @@ export default function App() {
             
             {/* INVOICE CONTAINER (Matches print sizes, styled beautifully) */}
             <div 
-              className="bg-white rounded-2xl border border-slate-250 hover:shadow-lg transition-all mx-auto max-w-[800px] shadow-sm p-6 sm:p-10 text-slate-800 leading-normal text-xs font-sans print:shadow-none print:border-none print:p-0 print:mx-0 print:max-w-none"
+              className="relative overflow-hidden bg-white rounded-2xl border border-slate-250 hover:shadow-lg transition-all mx-auto max-w-[800px] shadow-sm p-6 sm:p-10 text-slate-800 leading-normal text-xs font-sans print:shadow-none print:border-none print:p-0 print:mx-0 print:max-w-none"
               id="live-invoice-stage"
             >
+              {/* Rotating Watermark behind content */}
+              {logoBase64 && (fieldConfig.showWatermarkOnPdf ?? true) && (
+                <div className="absolute inset-0 flex items-center justify-center opacity-[0.04] pointer-events-none select-none z-0 overflow-hidden">
+                  <img 
+                    src={logoBase64} 
+                    alt="Watermark Overlay" 
+                    className="max-w-[40%] max-h-[40%] object-contain rotate-12"
+                    referrerPolicy="no-referrer"
+                  />
+                </div>
+              )}
+
               {/* BRAND HEADER */}
-              <div className="flex flex-col sm:flex-row justify-between gap-6 pb-6 border-b border-slate-100">
+              <div className="flex flex-col sm:flex-row justify-between gap-6 pb-6 border-b border-slate-100 relative z-10">
                 
                 {/* Seller Profile */}
-                <div className="space-y-2 max-w-[50%]">
-                  {seller.companyName && (
-                    <h3 className="text-xl font-display font-bold text-slate-900 tracking-tight">
-                      {seller.companyName}
-                    </h3>
-                  )}
+                <div className="space-y-3 max-w-[70%] text-left">
+                  <div className="flex items-center gap-2">
+                    {logoBase64 && (fieldConfig.showLogoOnPdf ?? true) && (
+                      <img 
+                        src={logoBase64} 
+                        alt="Company Logo" 
+                        className="h-12 w-auto object-contain max-w-[120px] shrink-0"
+                        referrerPolicy="no-referrer"
+                      />
+                    )}
+                    {seller.companyName && (
+                      <h3 className="text-2xl font-display font-bold text-slate-900 tracking-tight leading-tight">
+                        {seller.companyName}
+                      </h3>
+                    )}
+                  </div>
+
                   <div className="space-y-0.5 text-slate-500 font-medium">
                     {fieldConfig.showSellerAddress && seller.address && (
                       <p className="whitespace-pre-line text-[10.5px] leading-relaxed">
