@@ -191,6 +191,36 @@ const getProportionalDimensions = (base64: string, maxWidth: number, maxHeight: 
   });
 };
 
+const getFontAsBase64 = async (url: string, cacheKey: string): Promise<string> => {
+  const fullCacheKey = `pdf_font_${cacheKey}`;
+  try {
+    const cached = localStorage.getItem(fullCacheKey);
+    if (cached) return cached;
+  } catch (e) {
+    console.warn("Storage item read failed:", e);
+  }
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch font from ${url}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  
+  let binary = '';
+  const bytes = new Uint8Array(arrayBuffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
+  try {
+    localStorage.setItem(fullCacheKey, base64);
+  } catch (localStorageErr) {
+    console.warn("Could not cache font in localStorage due to quota limits, proceeding without cache:", localStorageErr);
+  }
+  return base64;
+};
+
 export default function App() {
   // --- STATE PERSISTENCE LOADERS & DEFAULTS ---
   const defaultSeller: SellerDetails = {
@@ -253,6 +283,19 @@ export default function App() {
       });
     }
   }, [logoBase64]);
+
+  useEffect(() => {
+    // Prefetch Roboto fonts for PDF rendering in the background
+    const ttfUrlRegular = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Regular.ttf';
+    const ttfUrlBold = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Bold.ttf';
+    const ttfUrlItalic = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Italic.ttf';
+    
+    Promise.all([
+      getFontAsBase64(ttfUrlRegular, 'roboto_regular').catch(err => console.warn("Prefetch regular font failed", err)),
+      getFontAsBase64(ttfUrlBold, 'roboto_bold').catch(err => console.warn("Prefetch bold font failed", err)),
+      getFontAsBase64(ttfUrlItalic, 'roboto_italic').catch(err => console.warn("Prefetch italic font failed", err))
+    ]);
+  }, []);
 
   const [fieldConfig, setFieldConfig] = useState(() => {
     const saved = localStorage.getItem('invoice_sf_field_config');
@@ -612,6 +655,33 @@ export default function App() {
         format: 'a4'
       });
 
+      let fontLoaded = false;
+      const ttfUrlRegular = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Regular.ttf';
+      const ttfUrlBold = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Bold.ttf';
+      const ttfUrlItalic = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Italic.ttf';
+
+      try {
+        const [regBase64, boldBase64, italicBase64] = await Promise.all([
+          getFontAsBase64(ttfUrlRegular, 'roboto_regular'),
+          getFontAsBase64(ttfUrlBold, 'roboto_bold'),
+          getFontAsBase64(ttfUrlItalic, 'roboto_italic')
+        ]);
+        if (regBase64 && boldBase64 && italicBase64) {
+          doc.addFileToVFS('Roboto-Regular.ttf', regBase64);
+          doc.addFont('Roboto-Regular.ttf', 'Roboto', 'normal');
+          doc.addFileToVFS('Roboto-Bold.ttf', boldBase64);
+          doc.addFont('Roboto-Bold.ttf', 'Roboto', 'bold');
+          doc.addFileToVFS('Roboto-Italic.ttf', italicBase64);
+          doc.addFont('Roboto-Italic.ttf', 'Roboto', 'italic');
+          fontLoaded = true;
+        }
+      } catch (fontErr) {
+        console.error("Custom fonts fail-load. Falling back to Helvetica with Rs.", fontErr);
+      }
+
+      const pdfFont = fontLoaded ? 'Roboto' : 'helvetica';
+      const pdfCurrencySymbol = (currency.code === 'INR' && !fontLoaded) ? 'Rs. ' : currency.symbol;
+
       const addPageWithWatermark = () => {
         doc.addPage();
         if (watermarkInfo) {
@@ -661,7 +731,7 @@ export default function App() {
           
           // Draw Company Name beside logo
           if (seller.companyName) {
-            doc.setFont('helvetica', 'bold');
+            doc.setFont(pdfFont, 'bold');
             doc.setFontSize(18);
             doc.setTextColor(darkText[0], darkText[1], darkText[2]);
             // Vertically center company name text with the logo height
@@ -675,7 +745,7 @@ export default function App() {
           console.error("Header logo draw failed:", e);
           // Fallback if draw fails
           if (seller.companyName) {
-            doc.setFont('helvetica', 'bold');
+            doc.setFont(pdfFont, 'bold');
             doc.setFontSize(18);
             doc.setTextColor(darkText[0], darkText[1], darkText[2]);
             doc.text(seller.companyName, 40, y + 12);
@@ -685,7 +755,7 @@ export default function App() {
       } else {
         // No logo: draw Company Name normally
         if (seller.companyName) {
-          doc.setFont('helvetica', 'bold');
+          doc.setFont(pdfFont, 'bold');
           doc.setFontSize(18);
           doc.setTextColor(darkText[0], darkText[1], darkText[2]);
           doc.text(seller.companyName, 40, y + 12);
@@ -694,13 +764,13 @@ export default function App() {
       }
       
       // Invoice Heading (Right)
-      doc.setFont('helvetica', 'bold');
+      doc.setFont(pdfFont, 'bold');
       doc.setFontSize(22);
       doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
       doc.text("INVOICE", 555, y + 15, { align: 'right' });
 
       // Seller Details (starts at left margin 40 under both logo and name)
-      doc.setFont('helvetica', 'normal');
+      doc.setFont(pdfFont, 'normal');
       doc.setFontSize(8.5);
       doc.setTextColor(grayText[0], grayText[1], grayText[2]);
       
@@ -744,10 +814,10 @@ export default function App() {
       doc.setFontSize(8.5);
       
       const drawPdfMeta = (label: string, value: string) => {
-        doc.setFont('helvetica', 'bold');
+        doc.setFont(pdfFont, 'bold');
         doc.setTextColor(darkText[0], darkText[1], darkText[2]);
         doc.text(label, 440, metaY, { align: 'right' });
-        doc.setFont('helvetica', 'normal');
+        doc.setFont(pdfFont, 'normal');
         doc.setTextColor(grayText[0], grayText[1], grayText[2]);
         doc.text(value, 555, metaY, { align: 'right' });
         metaY += 13;
@@ -779,14 +849,14 @@ export default function App() {
       const hasClientDetailsVisible = client.name || (fieldConfig.showClientAddress && client.address) || (calculations.isGstEnabled && (fieldConfig.showClientGstin && client.gstin || fieldConfig.showClientPlaceOfSupply && client.placeOfSupply));
       
       if (hasClientDetailsVisible) {
-        doc.setFont('helvetica', 'bold');
+        doc.setFont(pdfFont, 'bold');
         doc.setFontSize(8);
         doc.setTextColor(100, 116, 139); // Slate-500
         doc.text("BILL TO (CLIENT)", 40, y);
         y += 12;
 
         if (client.name) {
-          doc.setFont('helvetica', 'bold');
+          doc.setFont(pdfFont, 'bold');
           doc.setFontSize(11);
           doc.setTextColor(darkText[0], darkText[1], darkText[2]);
           doc.text(client.name, 40, y);
@@ -794,7 +864,7 @@ export default function App() {
         }
 
         if (fieldConfig.showClientAddress && client.address) {
-          doc.setFont('helvetica', 'normal');
+          doc.setFont(pdfFont, 'normal');
           doc.setFontSize(8.5);
           doc.setTextColor(grayText[0], grayText[1], grayText[2]);
           const clientLines = client.address.split('\n');
@@ -807,7 +877,7 @@ export default function App() {
         }
 
         if (calculations.isGstEnabled) {
-          doc.setFont('helvetica', 'normal');
+          doc.setFont(pdfFont, 'normal');
           doc.setFontSize(8.5);
           doc.setTextColor(grayText[0], grayText[1], grayText[2]);
           if (fieldConfig.showClientGstin && client.gstin) {
@@ -833,12 +903,12 @@ export default function App() {
           String(index + 1),
           item.description || 'Service/Item',
           String(item.quantity || 1),
-          `${currency.symbol}${(item.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          `${pdfCurrencySymbol}${(item.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
         ];
         if (calculations.isGstEnabled) {
           row.push(`${item.taxRate}%`);
         }
-        row.push(`${currency.symbol}${(item.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+        row.push(`${pdfCurrencySymbol}${(item.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
         return row;
       });
 
@@ -868,7 +938,7 @@ export default function App() {
         startY: y,
         theme: 'striped',
         styles: {
-          font: 'helvetica',
+          font: pdfFont,
           fontSize: 8.5,
           cellPadding: 6,
         },
@@ -910,7 +980,7 @@ export default function App() {
       const labelX = 440;
 
       const drawTotalLine = (label: string, symbol: string, value: number, isSub: boolean) => {
-        doc.setFont('helvetica', isSub ? 'normal' : 'bold');
+        doc.setFont(pdfFont, isSub ? 'normal' : 'bold');
         doc.setFontSize(isSub ? 8.5 : 10);
         doc.setTextColor(isSub ? grayText[0] : darkText[0], isSub ? grayText[1] : darkText[1], isSub ? grayText[2] : darkText[2]);
         doc.text(label, labelX, rightBoxY, { align: 'right' });
@@ -919,13 +989,13 @@ export default function App() {
       };
 
       // Raw Subtotal
-      drawTotalLine("Subtotal:", currency.symbol, calculations.subtotal, true);
+      drawTotalLine("Subtotal:", pdfCurrencySymbol, calculations.subtotal, true);
 
       // Discount
       if (discount.enabled && calculations.discountAmount > 0) {
         drawTotalLine(
           `Discount (${discount.type === 'percentage' ? `${discount.value}%` : 'Fixed'}):`, 
-          `- ${currency.symbol}`, 
+          `- ${pdfCurrencySymbol}`, 
           calculations.discountAmount, 
           true
         );
@@ -935,24 +1005,24 @@ export default function App() {
       if (calculations.isGstEnabled) {
         if (calculations.isSameState) {
           if (calculations.cgst > 0) {
-            drawTotalLine("CGST:", currency.symbol, calculations.cgst, true);
+            drawTotalLine("CGST:", pdfCurrencySymbol, calculations.cgst, true);
           }
           if (calculations.sgst > 0) {
-            drawTotalLine("SGST:", currency.symbol, calculations.sgst, true);
+            drawTotalLine("SGST:", pdfCurrencySymbol, calculations.sgst, true);
           }
         } else {
           if (calculations.igst > 0) {
-            drawTotalLine("IGST:", currency.symbol, calculations.igst, true);
+            drawTotalLine("IGST:", pdfCurrencySymbol, calculations.igst, true);
           }
         }
         if (calculations.totalTax > 0) {
-          drawTotalLine("Total Tax:", currency.symbol, calculations.totalTax, true);
+          drawTotalLine("Total Tax:", pdfCurrencySymbol, calculations.totalTax, true);
         }
       }
 
       // Additional charges
       if (charges.enabled && calculations.chargeAmount > 0) {
-        drawTotalLine(`${charges.label || 'Additional Charges'}:`, currency.symbol, calculations.chargeAmount, true);
+        drawTotalLine(`${charges.label || 'Additional Charges'}:`, pdfCurrencySymbol, calculations.chargeAmount, true);
       }
 
       // Visual line
@@ -963,11 +1033,11 @@ export default function App() {
       rightBoxY += 12;
 
       // Grand Total Highlight
-      doc.setFont('helvetica', 'bold');
+      doc.setFont(pdfFont, 'bold');
       doc.setFontSize(11);
       doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
       doc.text("Grand Total:", labelX, rightBoxY, { align: 'right' });
-      doc.text(`${currency.symbol}${calculations.grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, scoreX, rightBoxY, { align: 'right' });
+      doc.text(`${pdfCurrencySymbol}${calculations.grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, scoreX, rightBoxY, { align: 'right' });
 
       // BANKING block (Left column)
       let hasBank = false;
@@ -979,19 +1049,19 @@ export default function App() {
       if (payment.showUpiId && payment.upiId) hasBank = true;
 
       if (hasBank) {
-        doc.setFont('helvetica', 'bold');
+        doc.setFont(pdfFont, 'bold');
         doc.setFontSize(8);
         doc.setTextColor(148, 163, 184); // Slate-400
         doc.text("BANK & PAYMENT DETAILS", 40, leftBoxY);
         leftBoxY += 11;
 
         const drawBankRowPdf = (lbl: string, val: string) => {
-          doc.setFont('helvetica', 'bold');
+          doc.setFont(pdfFont, 'bold');
           doc.setFontSize(8);
           doc.setTextColor(darkText[0], darkText[1], darkText[2]);
           doc.text(`${lbl}:`, 40, leftBoxY);
           
-          doc.setFont('helvetica', 'normal');
+          doc.setFont(pdfFont, 'normal');
           doc.setFontSize(8);
           doc.setTextColor(grayText[0], grayText[1], grayText[2]);
           doc.text(val, 120, leftBoxY);
@@ -1009,13 +1079,13 @@ export default function App() {
       leftBoxY += 5;
 
       // Total in words
-      doc.setFont('helvetica', 'bold');
+      doc.setFont(pdfFont, 'bold');
       doc.setFontSize(7.5);
       doc.setTextColor(148, 163, 184); // Slate-400
       doc.text("GRAND TOTAL IN WORDS", 40, leftBoxY);
       leftBoxY += 10;
 
-      doc.setFont('helvetica', 'italic');
+      doc.setFont(pdfFont, 'italic');
       doc.setFontSize(8);
       doc.setTextColor(darkText[0], darkText[1], darkText[2]);
       const wordString = numberToWordsIndian(calculations.grandTotal, currency.code);
@@ -1040,13 +1110,13 @@ export default function App() {
 
       // Terms & Notes
       if (activeNotes) {
-        doc.setFont('helvetica', 'bold');
+        doc.setFont(pdfFont, 'bold');
         doc.setFontSize(8);
         doc.setTextColor(100, 116, 139);
         doc.text("TERMS & CONDITIONS", 40, notesY);
         notesY += 11;
 
-        doc.setFont('helvetica', 'normal');
+        doc.setFont(pdfFont, 'normal');
         doc.setFontSize(7.5);
         doc.setTextColor(148, 163, 184); // Slate-400
         const notesLines = activeNotes.split('\n');
@@ -1066,7 +1136,7 @@ export default function App() {
           addPageWithWatermark();
           sigY = 50;
         }
-        doc.setFont('helvetica', 'normal');
+        doc.setFont(pdfFont, 'normal');
         doc.setFontSize(8);
         doc.setTextColor(grayText[0], grayText[1], grayText[2]);
         if (seller.companyName) {
